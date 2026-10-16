@@ -49,6 +49,9 @@ sys-locale = "=0.3.2"
 [target.'cfg(target_os = "windows")'.dependencies]
 winsafe = { version = "=0.0.29", default-features = false, features = ["kernel", "dxgi"] }
 
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+
 [dev-dependencies]
 # egui's own default fonts in tests: the oracle for egui_fonts.rs, and contexts made with
 # `Context::default()` (no install_fonts) can lay out text.
