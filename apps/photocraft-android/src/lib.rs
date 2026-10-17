@@ -165,7 +165,10 @@ fn android_main(app: AndroidApp) {
         "PhotoCraft",
         options,
         Box::new(|cc| {
-            let session = Session::default();
+            let mut session = Session::default();
+            session.color.settings.ask_on_mismatch = false;
+            session.color.settings.ask_on_missing = false;
+            session.color.settings.ask_on_paste = false;
             let services = create_android_services();
             let mut app = PhotocraftApp::new(session, services);
             if let Some(rs) = cc.wgpu_render_state.clone() {
