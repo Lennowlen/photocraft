@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "photocraft-android"
 version.workspace = true
 edition.workspace = true
@@ -16,11 +16,12 @@ photocraft-color = { workspace = true }
 photocraft-raster = { workspace = true }
 photocraft-geom = { workspace = true }
 photocraft-compose = { workspace = true }
-eframe = { workspace = true, default-features = false, features = ["wgpu", "android-game-activity"] }
+eframe = { workspace = true, default-features = false, features = ["wgpu", "android-native-activity"] }
 egui = { workspace = true }
-android-activity = { version = "0.6", features = ["game-activity"] }
+android-activity = { version = "0.6", features = ["native-activity"] }
 log = { workspace = true }
 android_logger = "0.14"
+jni = "0.21"
 
 [package.metadata.android]
 package = "ai.storyteller.photocraft"

@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "photocraft-ui-egui"
 version.workspace = true
 edition.workspace = true
@@ -31,7 +31,7 @@ photocraft-format = { workspace = true }
 photocraft-codecs = { workspace = true }
 egui = { workspace = true }
 egui_extras = { version = "0.36", default-features = false, features = ["svg"] }
-eframe = { workspace = true, features = ["wgpu", "accesskit"] }
+eframe = { workspace = true, default-features = false, features = ["wgpu"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
@@ -50,7 +50,7 @@ sys-locale = "=0.3.2"
 winsafe = { version = "=0.0.29", default-features = false, features = ["kernel", "dxgi"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
-android-activity = { version = "0.6", features = ["game-activity"] }
+android-activity = { version = "0.6", features = ["native-activity"] }
 
 [dev-dependencies]
 # egui's own default fonts in tests: the oracle for egui_fonts.rs, and contexts made with
@@ -71,3 +71,4 @@ flate2 = { workspace = true }
 epaint_default_fonts = "0.36"
 serde_json = { workspace = true }
 toml = "1"
+
