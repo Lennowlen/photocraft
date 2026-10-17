@@ -5,7 +5,7 @@ use photocraft_engine::Session;
 use photocraft_ui_egui::{FileDialogAnswer, FileDialogReply, FileDialogRequest, PhotocraftApp, Services};
 use jni::objects::JValue;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const WORKSPACE_DIR: &str = "/sdcard/Download/ArtCraft";
 
@@ -54,26 +54,35 @@ fn save_file(
     save_through(doc, path, settings, ctl, |p, b, progress| write_atomic_progress(Path::new(p), b, progress))
 }
 
+#[derive(Clone, Debug, PartialEq)]
+enum DialogMode {
+    Open,
+    Save,
+}
+
+struct PendingDialog {
+    mode: DialogMode,
+    current_dir: PathBuf,
+    selected_file: Option<PathBuf>,
+    save_filename: String,
+    reply: Option<FileDialogReply>,
+}
+
+static PENDING_DIALOG: Mutex<Option<PendingDialog>> = Mutex::new(None);
+
 fn show_android_file_dialog(request: FileDialogRequest, _parent: Option<&eframe::Frame>, reply: FileDialogReply) {
     let base_dir = ensure_workspace_dir();
     match request {
-        FileDialogRequest::Open { multiple: _, initial_dir, extensions: _ } => {
+        FileDialogRequest::Open { initial_dir, .. } => {
             let scan_dir = initial_dir.map(PathBuf::from).unwrap_or(base_dir);
-            let mut candidates = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(&scan_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() {
-                        candidates.push(path.to_string_lossy().into_owned());
-                    }
-                }
-            }
-            candidates.sort();
-            if !candidates.is_empty() {
-                reply.send(Some(FileDialogAnswer::Paths(candidates)));
-            } else {
-                reply.send(None);
-            }
+            let mut dlg = PENDING_DIALOG.lock().unwrap();
+            *dlg = Some(PendingDialog {
+                mode: DialogMode::Open,
+                current_dir: scan_dir,
+                selected_file: None,
+                save_filename: String::new(),
+                reply: Some(reply),
+            });
         }
         FileDialogRequest::Folder { initial_dir } => {
             let dir = initial_dir.map(PathBuf::from).unwrap_or(base_dir);
@@ -81,10 +90,199 @@ fn show_android_file_dialog(request: FileDialogRequest, _parent: Option<&eframe:
         }
         FileDialogRequest::Save { suggested } => {
             let path = Path::new(&suggested);
-            let file_name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| suggested.clone());
-            let target = base_dir.join(file_name);
-            reply.send(Some(FileDialogAnswer::SaveTo(target.to_string_lossy().into_owned())));
+            let filename = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| suggested.clone());
+            let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).map(PathBuf::from).unwrap_or(base_dir);
+            let mut dlg = PENDING_DIALOG.lock().unwrap();
+            *dlg = Some(PendingDialog {
+                mode: DialogMode::Save,
+                current_dir: dir,
+                selected_file: None,
+                save_filename: filename,
+                reply: Some(reply),
+            });
         }
+    }
+}
+
+fn render_pending_file_dialog(ctx: &egui::Context) {
+    let mut dlg_guard = PENDING_DIALOG.lock().unwrap();
+    let Some(ref mut dlg) = *dlg_guard else { return };
+
+    let is_open = dlg.mode == DialogMode::Open;
+    let title = if is_open { "Buka Berkas (Open File)" } else { "Simpan Berkas (Save As)" };
+
+    let mut send_answer: Option<Option<FileDialogAnswer>> = None;
+    let mut navigate_to: Option<PathBuf> = None;
+
+    egui::Window::new(title)
+        .collapsible(false)
+        .resizable(true)
+        .default_size([720.0, 520.0])
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.add_space(4.0);
+
+            // Quick jump folders
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Lokasi:").strong());
+                if ui.button("ArtCraft Workspace").clicked() {
+                    navigate_to = Some(ensure_workspace_dir());
+                }
+                if ui.button("Download").clicked() {
+                    navigate_to = Some(PathBuf::from("/sdcard/Download"));
+                }
+                if ui.button("Pictures").clicked() {
+                    navigate_to = Some(PathBuf::from("/sdcard/Pictures"));
+                }
+                if ui.button("Documents").clicked() {
+                    navigate_to = Some(PathBuf::from("/sdcard/Documents"));
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.separator();
+
+            // Current Directory display & Up button
+            ui.horizontal(|ui| {
+                if let Some(parent) = dlg.current_dir.parent() {
+                    if ui.button("â¬† Naung / Up").clicked() {
+                        navigate_to = Some(parent.to_path_buf());
+                    }
+                }
+                ui.label(egui::RichText::new(dlg.current_dir.to_string_lossy()).monospace());
+            });
+
+            ui.separator();
+            ui.add_space(4.0);
+
+            // File & Directory list
+            let mut entries_list = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&dlg.current_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let is_dir = path.is_dir();
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+                    if !name.starts_with('.') {
+                        entries_list.push((name, path, is_dir));
+                    }
+                }
+            }
+            entries_list.sort_by(|a, b| {
+                if a.2 == b.2 {
+                    a.0.to_lowercase().cmp(&b.0.to_lowercase())
+                } else if a.2 {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Greater
+                }
+            });
+
+            egui::ScrollArea::vertical()
+                .max_height(300.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if entries_list.is_empty() {
+                        ui.label(egui::RichText::new("Direktori ini kosong.").italics());
+                    }
+                    for (name, path, is_dir) in entries_list {
+                        let is_selected = dlg.selected_file.as_ref() == Some(&path);
+                        ui.horizontal(|ui| {
+                            let icon = if is_dir { "ðŸ“" } else { "ðŸ–¼ï¸" };
+                            let label = format!("{} {}", icon, name);
+                            let resp = ui.selectable_label(is_selected, label);
+                            if resp.clicked() {
+                                if is_dir {
+                                    navigate_to = Some(path.clone());
+                                } else {
+                                    dlg.selected_file = Some(path.clone());
+                                    if !is_open {
+                                        dlg.save_filename = name.clone();
+                                    }
+                                }
+                            }
+                            if resp.double_clicked() {
+                                if is_dir {
+                                    navigate_to = Some(path);
+                                } else if is_open {
+                                    send_answer = Some(Some(FileDialogAnswer::Paths(vec![path.to_string_lossy().into_owned()])));
+                                }
+                            }
+                        });
+                    }
+                });
+
+            ui.separator();
+            ui.add_space(6.0);
+
+            // Save filename input if in Save mode
+            if !is_open {
+                ui.horizontal(|ui| {
+                    ui.label("Nama Berkas:");
+                    ui.text_edit_singleline(&mut dlg.save_filename);
+                });
+                ui.add_space(4.0);
+            }
+
+            // Action buttons
+            ui.horizontal(|ui| {
+                if ui.button(egui::RichText::new("Batal (Cancel)").color(egui::Color32::from_rgb(220, 80, 80))).clicked() {
+                    send_answer = Some(None);
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if is_open {
+                        let can_open = dlg.selected_file.is_some();
+                        let btn = ui.add_enabled(can_open, egui::Button::new(egui::RichText::new("Buka (Open)").strong()));
+                        if btn.clicked() {
+                            if let Some(ref sel) = dlg.selected_file {
+                                send_answer = Some(Some(FileDialogAnswer::Paths(vec![sel.to_string_lossy().into_owned()])));
+                            }
+                        }
+                    } else {
+                        let can_save = !dlg.save_filename.trim().is_empty();
+                        let btn = ui.add_enabled(can_save, egui::Button::new(egui::RichText::new("Simpan (Save)").strong()));
+                        if btn.clicked() {
+                            let target = dlg.current_dir.join(dlg.save_filename.trim());
+                            send_answer = Some(Some(FileDialogAnswer::SaveTo(target.to_string_lossy().into_owned())));
+                        }
+                    }
+                });
+            });
+        });
+
+    if let Some(new_dir) = navigate_to {
+        dlg.current_dir = new_dir;
+        dlg.selected_file = None;
+    }
+
+    if let Some(answer) = send_answer {
+        if let Some(reply) = dlg.reply.take() {
+            reply.send(answer);
+        }
+        *dlg_guard = None;
+    }
+}
+
+struct PhotoCraftAndroidApp {
+    inner: PhotocraftApp,
+}
+
+impl eframe::App for PhotoCraftAndroidApp {
+    fn on_exit(&mut self) {
+        self.inner.on_exit();
+    }
+
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.inner.logic(ctx, frame);
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.inner.raw_input_hook(ctx, raw_input);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.inner.ui(ui, frame);
+        render_pending_file_dialog(ui.ctx());
     }
 }
 
@@ -174,7 +372,7 @@ fn android_main(app: AndroidApp) {
             if let Some(rs) = cc.wgpu_render_state.clone() {
                 app.set_wgpu(rs);
             }
-            Ok(Box::new(app))
+            Ok(Box::new(PhotoCraftAndroidApp { inner: app }))
         }),
     );
 }
