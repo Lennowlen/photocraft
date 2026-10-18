@@ -157,3 +157,6 @@ opt-level = "z"
 [profile.wasm-release.package.photocraft-paint]
 opt-level = 3
 
+[patch.crates-io]
+winit = { path = "../winit-patched" }
+

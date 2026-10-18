@@ -212,16 +212,19 @@ fn status_message(app: &PhotocraftApp, ui: &mut egui::Ui, t: &Tokens) {
     ui.label(RichText::new(&app.ui.status).color(if is_err { t.warning } else { t.text_faint }));
 }
 
-/// Home button at the very start of Photoshop 2026's options bar: toggles the Home (start)
-/// screen over the open documents, which stay open.
+/// Home button at the very start of Photoshop 2026's options bar: always launches / returns to
+/// Craft Launcher on mobile/desktop, or toggles start screen when launcher service is unavailable.
 pub fn home_button(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let n = app.session.documents().len();
     let auto = app.session.prefs().general.auto_show_home_screen;
     let on = app.ui.chrome.shows_home(n, auto);
-    // With no documents and auto-show on, Home can't be dismissed (there's nothing behind it).
-    let can_toggle = n > 0 || !auto;
-    if icons::button(ui, "house", 26.0, on && can_toggle, tl!("Home")).clicked() && can_toggle {
-        app.ui.chrome.home = if on { None } else { Some(n) };
+    let resp = icons::button(ui, "house", 32.0, on, tl!("Home"));
+    if resp.clicked() {
+        if let Some(ref open_url) = app.services.open_url {
+            let _ = open_url("app://launcher");
+        } else {
+            app.ui.chrome.home = if on { None } else { Some(n) };
+        }
     }
 }
 

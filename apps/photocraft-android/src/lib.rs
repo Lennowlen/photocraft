@@ -65,15 +65,105 @@ struct PendingDialog {
     current_dir: PathBuf,
     selected_file: Option<PathBuf>,
     save_filename: String,
+    filter_extensions: Option<Vec<String>>,
     reply: Option<FileDialogReply>,
 }
 
+static ANDROID_APP: Mutex<Option<AndroidApp>> = Mutex::new(None);
 static PENDING_DIALOG: Mutex<Option<PendingDialog>> = Mutex::new(None);
+
+fn is_supported_image_extension(ext: &str) -> bool {
+    matches!(
+        ext.to_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tiff" | "tif" | "ico" | "tga" | "psd" | "svg" | "pcraft" | "raw" | "dng"
+    )
+}
+
+fn return_to_launcher() {
+    log::info!("return_to_launcher: Bringing Craft Launcher (ai.storyteller.craftlauncher) to foreground");
+    let guard = ANDROID_APP.lock().unwrap();
+    let Some(ref app) = *guard else { return };
+
+    let vm_ptr = app.vm_as_ptr();
+    let activity_ptr = app.activity_as_ptr();
+    if vm_ptr.is_null() || activity_ptr.is_null() {
+        return;
+    }
+
+    unsafe {
+        let jvm = match jni::JavaVM::from_raw(vm_ptr as *mut jni::sys::JavaVM) {
+            Ok(jvm) => jvm,
+            Err(_) => return,
+        };
+        let mut env = match jvm.attach_current_thread() {
+            Ok(env) => env,
+            Err(_) => return,
+        };
+        let activity = match jni::objects::JObject::from_raw(activity_ptr as jni::sys::jobject) {
+            activity if !activity.as_raw().is_null() => activity,
+            _ => return,
+        };
+
+        let act_class = match env.find_class("android/content/Intent") {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("find_class Intent failed: {:?}", e);
+                return;
+            }
+        };
+
+        let pkg_jstring = match env.new_string("ai.storyteller.craftlauncher") {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let cls_jstring = match env.new_string("android.app.NativeActivity") {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let intent_obj = match env.new_object(&act_class, "()V", &[]) {
+            Ok(obj) => obj,
+            Err(e) => {
+                log::error!("new Intent() failed: {:?}", e);
+                return;
+            }
+        };
+
+        let comp_class = match env.find_class("android/content/ComponentName") {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("find_class ComponentName failed: {:?}", e);
+                return;
+            }
+        };
+
+        let comp_obj = match env.new_object(&comp_class, "(Ljava/lang/String;Ljava/lang/String;)V", &[JValue::Object(&pkg_jstring), JValue::Object(&cls_jstring)]) {
+            Ok(obj) => obj,
+            Err(e) => {
+                log::error!("new ComponentName failed: {:?}", e);
+                return;
+            }
+        };
+
+        let _ = env.call_method(&intent_obj, "setComponent", "(Landroid/content/ComponentName;)Landroid/content/Intent;", &[JValue::Object(&comp_obj)]);
+
+        let flags: i32 = 0x10000000 | 0x00020000; // FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+        let _ = env.call_method(&intent_obj, "setFlags", "(I)Landroid/content/Intent;", &[JValue::Int(flags)]);
+
+        match env.call_method(&activity, "startActivity", "(Landroid/content/Intent;)V", &[JValue::Object(&intent_obj)]) {
+            Ok(_) => log::info!("return_to_launcher: explicit ComponentName startActivity SUCCESS!"),
+            Err(e) => log::error!("return_to_launcher: explicit startActivity FAILED: {:?}", e),
+        }
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_clear();
+        }
+    }
+}
 
 fn show_android_file_dialog(request: FileDialogRequest, _parent: Option<&eframe::Frame>, reply: FileDialogReply) {
     let base_dir = ensure_workspace_dir();
     match request {
-        FileDialogRequest::Open { initial_dir, .. } => {
+        FileDialogRequest::Open { initial_dir, extensions, .. } => {
             let scan_dir = initial_dir.map(PathBuf::from).unwrap_or(base_dir);
             let mut dlg = PENDING_DIALOG.lock().unwrap();
             *dlg = Some(PendingDialog {
@@ -81,6 +171,7 @@ fn show_android_file_dialog(request: FileDialogRequest, _parent: Option<&eframe:
                 current_dir: scan_dir,
                 selected_file: None,
                 save_filename: String::new(),
+                filter_extensions: extensions,
                 reply: Some(reply),
             });
         }
@@ -98,6 +189,7 @@ fn show_android_file_dialog(request: FileDialogRequest, _parent: Option<&eframe:
                 current_dir: dir,
                 selected_file: None,
                 save_filename: filename,
+                filter_extensions: None,
                 reply: Some(reply),
             });
         }
@@ -145,7 +237,7 @@ fn render_pending_file_dialog(ctx: &egui::Context) {
             // Current Directory display & Up button
             ui.horizontal(|ui| {
                 if let Some(parent) = dlg.current_dir.parent() {
-                    if ui.button("â¬† Naung / Up").clicked() {
+                    if ui.button("[^] Naik / Up").clicked() {
                         navigate_to = Some(parent.to_path_buf());
                     }
                 }
@@ -163,7 +255,18 @@ fn render_pending_file_dialog(ctx: &egui::Context) {
                     let is_dir = path.is_dir();
                     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
                     if !name.starts_with('.') {
-                        entries_list.push((name, path, is_dir));
+                        if is_dir {
+                            entries_list.push((name, path, true));
+                        } else {
+                            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                            let matches_filter = match &dlg.filter_extensions {
+                                Some(filters) => filters.iter().any(|f| f.trim_start_matches('.').eq_ignore_ascii_case(ext)),
+                                None => is_supported_image_extension(ext),
+                            };
+                            if !is_open || matches_filter {
+                                entries_list.push((name, path, false));
+                            }
+                        }
                     }
                 }
             }
@@ -187,7 +290,7 @@ fn render_pending_file_dialog(ctx: &egui::Context) {
                     for (name, path, is_dir) in entries_list {
                         let is_selected = dlg.selected_file.as_ref() == Some(&path);
                         ui.horizontal(|ui| {
-                            let icon = if is_dir { "ðŸ“" } else { "ðŸ–¼ï¸" };
+                            let icon = if is_dir { "[DIR]" } else { "[FILE]" };
                             let label = format!("{} {}", icon, name);
                             let resp = ui.selectable_label(is_selected, label);
                             if resp.clicked() {
@@ -306,6 +409,14 @@ fn create_android_services() -> Services {
             let img = Image::from_u8(w, h, ChannelLayout::Rgba, rgba.to_vec()).map_err(|e| e.to_string())?;
             photocraft_codecs::encode(&img, photocraft_codecs::Format::Png, &EncodeOptions::default()).map_err(|e| e.to_string())
         })),
+        open_url: Some(Box::new(|url: &str| {
+            if url == "app://launcher" {
+                return_to_launcher();
+                Ok(())
+            } else {
+                Err("unsupported url".into())
+            }
+        })),
         ..Default::default()
     }
 }
@@ -353,6 +464,8 @@ fn android_main(app: AndroidApp) {
     );
 
     log::info!("Starting PhotoCraft on Android ARM64...");
+
+    *ANDROID_APP.lock().unwrap() = Some(app.clone());
 
     apply_immersive_sticky(&app);
 

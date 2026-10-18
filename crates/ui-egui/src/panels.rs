@@ -918,10 +918,8 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             // Include its gutter in the container layout, including right-aligned actions.
             egui::Frame::NONE.inner_margin(egui::Margin { right: 2, ..Default::default() }).show(ui, |ui| {
             crate::direction::horizontal_centered(ui, |ui| {
-                if t.pro {
-                    crate::chrome_ui::home_button(app, ui);
-                    widgets::vline(ui, 22.0);
-                }
+                crate::chrome_ui::home_button(app, ui);
+                widgets::vline(ui, 22.0);
                 let tool_icon = icons::button(ui, icons::tool_icon(app.ui.tool), if t.pro { 26.0 } else { 28.0 }, !t.pro, tl!(app.ui.tool.label()));
                 // Photoshop: right-click the tool icon for Reset Tool / Reset All Tools (#2825).
                 let mut reset = None;
